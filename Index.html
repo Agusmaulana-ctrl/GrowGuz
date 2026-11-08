@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>MiniTopia - Sandbox Game</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#1a1a2e; color:#fff; font-family:'Segoe UI',sans-serif;
+    display:flex; flex-direction:column; align-items:center; overflow:hidden;
+  }
+  #gameCanvas {
+    display:block; background:#87CEEB;
+    border:4px solid #0f3460; border-radius:8px; margin-top:10px;
+    image-rendering:pixelated;
+  }
+  #hotbar {
+    position:fixed; bottom:10px; left:50%; transform:translateX(-50%);
+    display:flex; gap:6px; background:rgba(0,0,0,0.7); padding:8px; border-radius:10px;
+  }
+  .slot {
+    width:56px; height:56px; background:#2d2d44; border:2px solid #555;
+    border-radius:6px; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; font-size:10px; cursor:pointer; position:relative;
+    transition:transform 0.1s;
+  }
+  .slot:hover { transform:scale(1.08); }
+  .slot.active { border-color:#ffd700; box-shadow:0 0 10px #ffd700; }
+  .slot .icon { font-size:22px; }
+  .slot .count {
+    position:absolute; bottom:2px; right:4px; font-size:11px;
+    font-weight:bold; color:#fff; text-shadow:1px 1px 2px #000;
+  }
+  #info {
+    position:fixed; top:10px; left:10px; background:rgba(0,0,0,0.6);
+    padding:8px 12px; border-radius:6px; font-size:13px; line-height:1.5;
+  }
+  #info b { color:#ffd700; }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<div id="info">
+  🎮 <b>MiniTopia</b><br>
+  A/D atau ←/→ : Gerak<br>
+  W/Spasi : Lompat<br>
+  Klik Kiri : Hancurkan blok<br>
+  Klik Kanan : Tanam / Gunakan item<br>
+  Scroll : Ganti slot
+</div>
+
+<div id="hotbar"></div>
+
+<script>
+// ========== KONFIGURASI ==========
+const TILE = 40;            // ukuran tile
+const COLS = 40;            // lebar world (tile)
+const ROWS = 20;            // tinggi world (tile)
+const GRAVITY = 0.6;
+const MOVE_SPEED = 4;
+const JUMP_POWER = 11;
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = COLS * TILE;
+canvas.height = ROWS * TILE;
+
+// ========== DEFINISI ITEM/BLOK ==========
+const ITEMS = {
+  dirt:   { name:'Dirt',   color:'#8B4513', icon:'🟫', solid:true,  growable:false },
+  grass:  { name:'Grass',  color:'#3a7d44', icon:'🟩', solid:true,  growable:false },
+  stone:  { name:'Stone',  color:'#777',    icon:'⬜', solid:true,  growable:false },
+  wood:   { name:'Wood',   color:'#a0522d', icon:'🪵', solid:true,  growable:false },
+  seed:   { name:'Seed',   color:'#c8b400', icon:'🌱', solid:false, growable:true, growTime:5000, result:'tree' },
+  tree:   { name:'Tree',   color:'#2e8b57', icon:'🌳', solid:true,  growable:false },
+  lava:   { name:'Lava',   color:'#ff4500', icon:'🔥', solid:false, growable:false, deadly:true },
+};
+
+// ========== WORLD / MAP ==========
+// world[y][x] = null | { type:'dirt', placedAt:timestamp, seed:false }
+let world = [];
+function initWorld() {
+  world = Array.from({length: ROWS}, () => Array(COLS).fill(null));
+  // Tanah dasar
+  for (let x = 0; x < COLS; x++) {
+    world[ROWS-1][x] = { type:'stone' };
+    world[ROWS-2][x] = { type:'dirt' };
+    world[ROWS-3][x] = { type:'grass' };
+  }
+  // Beberapa blok dekor
+  world[ROWS-4][5] = { type:'wood' };
+  world[ROWS-5][5] = { type:'wood' };
+  world[ROWS-4][12] = { type:'stone' };
+}
+initWorld();
+
+// ========== PLAYER ==========
+const player = {
+  x: 5 * TILE,
+  y: (ROWS-4) * TILE,
+  w: TILE * 0.8,
+  h: TILE * 1.6,
+  vx: 0,
+  vy: 0,
+  onGround: false,
+  facing: 1,
+};
+
+// ========== INVENTARIS ==========
+const inventory = [
+  { type:'dirt',  count:50 },
+  { type:'grass', count:30 },
+  { type:'stone', count:30 },
+  { type:'wood',  count:20 },
+  { type:'seed',  count:10 },
+  { type:'lava',  count:5  },
+];
+let selectedSlot = 0;
+
+// ========== INPUT ==========
+const keys = {};
+let mouseX = 0, mouseY = 0, mouseLeft = false, mouseRight = false;
+
+addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (['arrowleft','arrowright','arrowup','arrowdown',' '].includes(e.key.toLowerCase())) e.preventDefault();
+});
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - r.left) * (canvas.width / r.width);
+  mouseY = (e.clientY - r.top)  * (canvas.height / r.height);
+});
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0) mouseLeft = true;
+  if (e.button === 2) mouseRight = true;
+});
+canvas.addEventListener('mouseup', e => {
+  if (e.button === 0) mouseLeft = false;
+  if (e.button === 2) mouseRight = false;
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+addEventListener('wheel', e => {
+  selectedSlot = (selectedSlot + (e.deltaY > 0 ? 1 : -1) + inventory.length) % inventory.length;
+  renderHotbar();
+});
+
+// ========== HOTBAR ==========
+function renderHotbar() {
+  const bar = document.getElementById('hotbar');
+  bar.innerHTML = '';
+  inventory.forEach((item, i) => {
+    const def = ITEMS[item.type];
+    const slot = document.createElement('div');
+    slot.className = 'slot' + (i === selectedSlot ? ' active' : '');
+    slot.innerHTML = `<div class="icon">${def.icon}</div>
+                      <div style="font-size:9px">${def.name}</div>
+                      <div class="count">${item.count}</div>`;
+    slot.onclick = () => { selectedSlot = i; renderHotbar(); };
+    bar.appendChild(slot);
+  });
+}
+renderHotbar();
+
+// ========== UTIL ==========
+const tileAt = (px, py) => {
+  const tx = Math.floor(px / TILE), ty = Math.floor(py / TILE);
+  if (ty < 0 || ty >= ROWS || tx < 0 || tx >= COLS) return null;
+  return { tx, ty, tile: world[ty][tx] };
+};
+const isSolidAt = (px, py) => {
+  const t = tileAt(px, py);
+  return t && t.tile && ITEMS[t.tile.type].solid;
+};
+
+// ========== FISIKA PLAYER ==========
+function updatePlayer() {
+  // Gerak horizontal
+  player.vx = 0;
+  if (keys['a'] || keys['arrowleft'])  { player.vx = -MOVE_SPEED; player.facing = -1; }
+  if (keys['d'] || keys['arrowright']) { player.vx =  MOVE_SPEED; player.facing =  1; }
+
+  // Lompat
+  if ((keys['w'] || keys[' '] || keys['arrowup']) && player.onGround) {
+    player.vy = -JUMP_POWER;
+    player.onGround = false;
+  }
+
+  // Gravity
+  player.vy += GRAVITY;
+  if (player.vy > 15) player.vy = 15;
+
+  // --- Collision X ---
+  player.x += player.vx;
+  let top = player.y, bottom = player.y + player.h;
+  let left = player.x, right = player.x + player.w;
+
+  // Cek kolom kiri / kanan
+  if (player.vx < 0) {
+    if (isSolidAt(left, top + player.h/2) || isSolidAt(left, bottom - 2)) {
+      player.x = Math.floor(left / TILE) * TILE + TILE;
+    }
+  } else if (player.vx > 0) {
+    if (isSolidAt(right, top + player.h/2) || isSolidAt(right, bottom - 2)) {
+      player.x = Math.floor(right / TILE) * TILE - player.w;
+    }
+  }
+
+  // --- Collision Y ---
+  player.y += player.vy;
+  player.onGround = false;
+  top = player.y; bottom = player.y + player.h;
+  left = player.x; right = player.x + player.w;
+
+  if (player.vy > 0) { // jatuh
+    if (isSolidAt(left + 2, bottom) || isSolidAt(right - 2, bottom)) {
+      player.y = Math.floor(bottom / TILE) * TILE - player.h;
+      player.vy = 0;
+      player.onGround = true;
+    }
+  } else if (player.vy < 0) { // naik
+    if (isSolidAt(left + 2, top) || isSolidAt(right - 2, top)) {
+      player.y = Math.floor(top / TILE) * TILE + TILE;
+      player.vy = 0;
+    }
+  }
+
+  // Batas dunia
+  if (player.x < 0) player.x = 0;
+  if (player.x + player.w > COLS * TILE) player.x = COLS * TILE - player.w;
+  if (player.y + player.h > ROWS * TILE) {
+    player.y = ROWS * TILE - player.h;
+    player.vy = 0;
+    player.onGround = true;
+  }
+}
+
+// ========== INTERAKSI ==========
+let lastActionTime = 0;
+
+function handleInteractions() {
+  const now = performance.now();
+  if (now - lastActionTime < 120) return;
+
+  const tile = tileAt(mouseX, mouseY);
+  if (!tile) return;
+
+  // Jangan timpa player
+  const playerRect = { x: player.x, y: player.y, w: player.w, h: player.h };
+  const tileRect   = { x: tile.tx * TILE, y: tile.ty * TILE, w: TILE, h: TILE };
+  const overlap = !(playerRect.x + playerRect.w < tileRect.x ||
+                    playerRect.x > tileRect.x + tileRect.w ||
+                    playerRect.y + playerRect.h < tileRect.y ||
+                    playerRect.y > tileRect.y + tileRect.h);
+
+  // Hancurkan blok
+  if (mouseLeft && tile.tile) {
+    // Beri ke inventaris
+    const t = tile.tile.type;
+    const inv = inventory.find(i => i.type === t);
+    if (inv) inv.count++; else inventory.push({ type:t, count:1 });
+
+    world[tile.ty][tile.tx] = null;
+    lastActionTime = now;
+    renderHotbar();
+    return;
+  }
+
+  // Tanam / pasang blok
+  if (mouseRight && !mouseLeft) {
+    if (overlap) return;
+    if (tile.tile) return;
+
+    const item = inventory[selectedSlot];
+    if (!item || item.count <= 0) return;
+
+    const def = ITEMS[item.type];
+    world[tile.ty][tile.tx] = {
+      type: item.type,
+      placedAt: now,
+      growing: def.growable
+    };
+    item.count--;
+    if (item.count <= 0) inventory.splice(selectedSlot, 1);
+    if (selectedSlot >= inventory.length) selectedSlot = 0;
+    lastActionTime = now;
+    renderHotbar();
+    return;
+  }
+}
+
+// ========== PERTUMBUHAN TANAMAN ==========
+function updateGrowth() {
+  const now = performance.now();
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const t = world[y][x];
+      if (!t || !t.growing) continue;
+      const def = ITEMS[t.type];
+      if (def.growable && now - t.placedAt >= def.growTime) {
+        // Ubah jadi hasil (tree) di atasnya
+        world[y][x] = { type: def.result };
+        if (y > 0 && !world[y-1][x]) {
+          world[y-1][x] = { type: def.result };
+        }
+      }
+    }
+  }
+}
+
+// ========== RENDER ==========
+function drawWorld() {
+  // Latar langit
+  const grad = ctx.createLinearGradient(0,0,0,canvas.height);
+  grad.addColorStop(0,'#87CEEB');
+  grad.addColorStop(1,'#b0e0ff');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // Grid lines (halus)
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  for (let x = 0; x <= COLS; x++) {
+    ctx.beginPath(); ctx.moveTo(x*TILE,0); ctx.lineTo(x*TILE,canvas.height); ctx.stroke();
+  }
+  for (let y = 0; y <= ROWS; y++) {
+    ctx.beginPath(); ctx.moveTo(0,y*TILE); ctx.lineTo(canvas.width,y*TILE); ctx.stroke();
+  }
+
+  // Tile
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const t = world[y][x];
+      if (!t) continue;
+      const def = ITEMS[t.type];
+      const px = x*TILE, py = y*TILE;
+
+      // Efek grow
+      if (t.growing) {
+        const p = Math.min(1, (performance.now() - t.placedAt) / def.growTime);
+        ctx.fillStyle = def.color;
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(px, py + TILE * (1-p), TILE, TILE * p);
+        // Outline
+        ctx.strokeStyle = '#ffd700';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(px+1, py+1, TILE-2, TILE-2);
+        // Icon kecil
+        ctx.font = '16px serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#fff';
+        ctx.fillText(def.icon, px + TILE/2, py + TILE/2);
+        continue;
+      }
+
+      // Tile normal
+      ctx.fillStyle = def.color;
+      ctx.fillRect(px, py, TILE, TILE);
+
+      // Tekstur
+      ctx.fillStyle = 'rgba(0,0,0,0.12)';
+      ctx.fillRect(px + 4, py + 4, TILE - 8, 4);
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 0.5, py + 0.5, TILE - 1, TILE - 1);
+
+      // Ikon
+      ctx.font = '18px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(def.icon, px + TILE/2, py + TILE/2);
+    }
+  }
+
+  // Highlight kursor
+  const tile = tileAt(mouseX, mouseY);
+  if (tile) {
+    ctx.strokeStyle = 'rgba(255,255,0,0.9)';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(tile.tx*TILE+2, tile.ty*TILE+2, TILE-4, TILE-4);
+  }
+}
+
+function drawPlayer() {
+  const {x, y, w, h} = player;
+  // Bayangan
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(x + w/2, y + h, w*0.5, 6, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Badan
+  ctx.fillStyle = '#4a90e2';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, w, h);
+
+  // Mata
+  ctx.fillStyle = '#fff';
+  const eyeY = y + h*0.25;
+  const eyeSize = w*0.22;
+  ctx.beginPath();
+  ctx.arc(x + w*0.35, eyeY, eyeSize, 0, Math.PI*2);
+  ctx.arc(x + w*0.65, eyeY, eyeSize, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#000';
+  const pupilOffset = player.facing * eyeSize * 0.3;
+  ctx.beginPath();
+  ctx.arc(x + w*0.35 + pupilOffset, eyeY, eyeSize*0.5, 0, Math.PI*2);
+  ctx.arc(x + w*0.65 + pupilOffset, eyeY, eyeSize*0.5, 0, Math.PI*2);
+  ctx.fill();
+
+  // Nama
+  ctx.font = 'bold 11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 3;
+  ctx.strokeText('Player', x + w/2, y - 6);
+  ctx.fillText('Player', x + w/2, y - 6);
+}
+
+// ========== GAME LOOP ==========
+function gameLoop() {
+  updatePlayer();
+  handleInteractions();
+  updateGrowth();
+
+  drawWorld();
+  drawPlayer();
+
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>
